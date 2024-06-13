@@ -25,7 +25,7 @@ async fn main() {
 
     let segwit_address = segwit_pubkey.p2shwpkh_address(network);
     let taproot_address = taproot_pubkey.p2tr_address(&secp, network);
-    let fee_rate = 200; //utils::get_fee_rate(&rpc_url).await;
+    let fee_rate = utils::get_fee_rate(&rpc_url).await;
 
     println!("Segwit Address: {}", segwit_address);
     println!("Taproot Address: {}", taproot_address);
@@ -48,12 +48,9 @@ async fn main() {
         .filter(|(i, _)| selected_utxo_indices.contains(i))
         .map(|(_, utxo)| utxo)
         .collect::<Vec<_>>();
-
     let rune_block = 840_000;
     let rune_txn = 65;
-    let mint_count = 3;
-    let tax_value = 546;
-    let tax_compressed_pubkey = *segwit_pubkey.compressed_pubkey();
+    let mint_count = 20;
     let input_utxos = utils::get_input_utxos(&selected_utxos, &rpc_url).await;
 
     let mint_runes_request = MintRunesRequest {
@@ -63,8 +60,6 @@ async fn main() {
         rune_block,
         rune_txn,
         repeats: mint_count,
-        tax_compressed_pubkey,
-        tax_value,
         fee_rate,
     };
 
@@ -85,10 +80,14 @@ async fn main() {
         .map(|psbt| taproot_finalize(&secp, master_xpriv, psbt.clone()))
         .collect::<Vec<_>>();
 
-    let broadcast_segwit = utils::broadcast_raw_txn(&signed_segwit_raw_txn, &rpc_url).await;
+    let broadcast_segwit = utils::broadcast_raw_txn(&signed_segwit_raw_txn, &rpc_url)
+        .await
+        .expect("broadcast segwit txn");
     println!("Segwit: {:?}", broadcast_segwit);
     for (i, signed_taproot_raw_txn) in signed_taproot_raw_txns.iter().enumerate() {
-        let broadcast_taproot = utils::broadcast_raw_txn(signed_taproot_raw_txn, &rpc_url).await;
+        let broadcast_taproot = utils::broadcast_raw_txn(signed_taproot_raw_txn, &rpc_url)
+            .await
+            .expect("broadcast taproot txn");
         println!("Taproot {}: {:?}", i, broadcast_taproot);
     }
 }
@@ -102,8 +101,6 @@ fn segwit_finalize<C: Signing + Verification>(
     master_xpriv: Xpriv,
     mut psbt: Psbt,
 ) -> String {
-    println!("PSBT Inputs: {:#?}", psbt.inputs);
-
     psbt.sign(&master_xpriv, &secp).expect("valid signature");
 
     psbt.inputs.iter_mut().for_each(|input| {
@@ -118,8 +115,8 @@ fn segwit_finalize<C: Signing + Verification>(
     // let huh = signed_tx.compute_wtxid();
 
     println!(
-        "Signed TX @ {:?} | {:?} vB | {:?} fee \n {:#?}",
-        signed_txid, vbytes, psbt_fee, signed_tx
+        "Signed TX @ {:?} | {:?} vB | {:?} fee",
+        signed_txid, vbytes, psbt_fee
     );
 
     consensus::encode::serialize_hex(&signed_tx)
@@ -130,8 +127,6 @@ fn taproot_finalize<C: Signing + Verification>(
     master_xpriv: Xpriv,
     mut psbt: Psbt,
 ) -> String {
-    println!("PSBT Inputs: {:#?}", psbt.inputs[0].witness_utxo);
-
     psbt.sign(&master_xpriv, &secp).expect("valid signature");
 
     psbt.inputs.iter_mut().for_each(|input| {
@@ -146,8 +141,8 @@ fn taproot_finalize<C: Signing + Verification>(
     let signed_txid = signed_tx.compute_txid();
 
     println!(
-        "Signed TX @ {:?} | {:?} vB | {:?} fee \n {:#?}",
-        signed_txid, vbytes, psbt_fee, signed_tx
+        "Signed TX @ {:?} | {:?} vB | {:?} fee",
+        signed_txid, vbytes, psbt_fee
     );
 
     serialized_signed_tx

@@ -1,19 +1,16 @@
-use std::collections::BTreeMap;
 use std::str::FromStr;
 
 use bitcoin::absolute::LockTime;
 use bitcoin::bip32::{DerivationPath, Xpriv, Xpub};
-use bitcoin::blockdata::transaction::{OutPoint, Transaction, TxIn, TxOut};
+use bitcoin::blockdata::transaction::{Transaction, TxOut};
 use bitcoin::blockdata::{
     opcodes,
     script::{self, ScriptBuf},
 };
 use bitcoin::constants::MAX_SCRIPT_ELEMENT_SIZE;
-use bitcoin::key::CompressedPublicKey;
-use bitcoin::psbt::{Input as PsbtInput, Psbt};
+use bitcoin::psbt::Psbt;
 use bitcoin::secp256k1::Secp256k1;
-use bitcoin::TapSighashType;
-use bitcoin::{Address, Amount, Sequence, Witness};
+use bitcoin::Amount;
 use bitcoin::{FeeRate, Network};
 
 use serde::{Deserialize, Serialize};
@@ -51,10 +48,6 @@ pub struct MintRunesRequest {
     pub repeats: u32,
     /// Input Utxos
     pub input_utxos: Vec<InputUtxo>,
-    /// the tax value remitted to the tax_compressed_pubkey, in satoshi
-    pub tax_value: u64,
-    /// the tax compressed public key
-    pub tax_compressed_pubkey: CompressedPublicKey,
     /// the fee rate in satoshi per vbyte
     pub fee_rate: u64,
 }
@@ -82,11 +75,6 @@ pub async fn handler(req: MintRunesRequest) -> MintRunesResponse {
 
     let input_utxos = &req.input_utxos;
 
-    let tax_value = Amount::from_sat(req.tax_value);
-
-    let tax_compressed_pubkey = req.tax_compressed_pubkey;
-    let tax_segwit_address = Address::p2shwpkh(&tax_compressed_pubkey, Network::Bitcoin);
-
     let fee_rate = match FeeRate::from_sat_per_vb(req.fee_rate) {
         Some(fee_rate) => fee_rate,
         None => panic!("Invalid fee rate (sat / vB)"),
@@ -97,7 +85,7 @@ pub async fn handler(req: MintRunesRequest) -> MintRunesResponse {
     // Extract how many levels of minting we need to do
     let mint_count = req.repeats;
     // Determine the minimum total output value
-    let total_output_value = tax_value + P2TR_DUST_LIMIT * mint_count as u64;
+    let total_output_value = P2TR_DUST_LIMIT * mint_count as u64;
     // Determine the right stone for this rune
     let mint_rune_script_pubkey = build_mint_rune_script_pubkey(req.rune_block, req.rune_txn);
 
@@ -142,14 +130,7 @@ pub async fn handler(req: MintRunesRequest) -> MintRunesResponse {
             },
         ],
     };
-    // In the case where we only have one mint and we need to pay the tax
-    if mint_count == 1 && tax_value > P2SHWPKH_DUST_LIMIT {
-        // Pay the tax
-        dummy_parent_txn.output.push(TxOut {
-            value: tax_value,
-            script_pubkey: tax_segwit_address.script_pubkey(),
-        });
-    } else if mint_count != 1 {
+    if mint_count != 1 {
         // Otherwise we need to pay some fees forward to the next mint
         dummy_parent_txn.output.push(TxOut {
             value: Amount::MAX,
@@ -212,16 +193,8 @@ pub async fn handler(req: MintRunesRequest) -> MintRunesResponse {
         };
 
         // Is this the last mint?
-        // NOTE: idt this needs to happen for the purposes of
-        //  vsize estimation, but we'll do it anyway
-        if i == mint_count - 1 {
-            // Then we need to pay the tax
-            dummy_child_txn.output.push(TxOut {
-                value: tax_value,
-                script_pubkey: tax_segwit_address.script_pubkey(),
-            });
-        } else {
-            // Otherwise we need to pay some fees forward
+        if i != mint_count - 1 {
+            // we need to pay some fees forward
             //  to the next mint. We'll just set this to MAX
             //    here.
             dummy_child_txn.output.push(TxOut {
@@ -319,15 +292,9 @@ pub async fn handler(req: MintRunesRequest) -> MintRunesResponse {
             script_pubkey: segwit_address.script_pubkey(),
         });
     }
-    // In the case where we only have one mint and we need to pay the tax
-    if mint_count == 1 && tax_value > P2SHWPKH_DUST_LIMIT {
-        //  we need to pay the tax
-        parent_outputs.push(TxOut {
-            value: tax_value,
-            script_pubkey: tax_segwit_address.script_pubkey(),
-        });
-    } else if mint_count != 1 {
-        // Otherwise we need to pay some fees forward to the next mint
+    // In the case where we have more mints to do,
+    if mint_count != 1 {
+        // we need to pay some fees forward to the next mint
         parent_outputs.push(TxOut {
             // We need to pay forward the remaining output value (following
             //  those paid in this parent )and miner fee, discounting the relay
@@ -418,15 +385,9 @@ pub async fn handler(req: MintRunesRequest) -> MintRunesResponse {
             ],
         };
 
-        // Is this the last mint?
-        if i == mint_count - 1 {
-            // Then we need to pay the tax
-            child_txn.output.push(TxOut {
-                value: tax_value,
-                script_pubkey: tax_segwit_address.script_pubkey(),
-            });
-        } else {
-            // Otherwise we need to pay some fees forward
+        // Is this not the last mint?
+        if i != mint_count - 1 {
+            // then we need to pay some fees forward
             //  to the next mint.
             child_txn.output.push(TxOut {
                 value: miner_fee + remaining_output_value - paid_relay_fee,

@@ -147,7 +147,9 @@ pub async fn get_fee_rate(rpc_url: &str) -> u64 {
     (fee_rate_btc_p_kvb * 100_000.0) as u64
 }
 
-pub async fn broadcast_raw_txn(raw_txn: &str, rpc_url: &str) -> String {
+pub async fn broadcast_raw_txn(raw_txn: &str, rpc_url: &str) -> Option<String> {
+    use std::{thread, time};
+
     let client = Client::new();
     let decode_txn = client
         .post(rpc_url)
@@ -160,21 +162,43 @@ pub async fn broadcast_raw_txn(raw_txn: &str, rpc_url: &str) -> String {
         .send()
         .await
         .unwrap();
+    /*
     println!(
         "Sending {:#?}",
         decode_txn.json::<serde_json::Value>().await.unwrap()
     );
+    */
 
-    let response = client
-        .post(rpc_url)
-        .json(&json!({
-            "jsonrpc": "1.0",
-            "id": "curltest",
-            "method": "sendrawtransaction",
-            "params": [raw_txn, 0]
-        }))
-        .send()
-        .await
-        .unwrap();
-    response.text().await.unwrap()
+    let retry = 7;
+    let mut txn_id = None;
+    for i in 0..retry {
+        let response = client
+            .post(rpc_url)
+            .json(&json!({
+                "jsonrpc": "1.0",
+                "id": "curltest",
+                "method": "sendrawtransaction",
+                "params": [raw_txn, 0]
+            }))
+            .send()
+            .await
+            .unwrap();
+        let response_json: serde_json::Value = response.json().await.unwrap();
+        if response_json["error"].is_null() {
+            txn_id = Some(response_json["result"].as_str().unwrap().to_string());
+            break;
+        }
+        // Otherwise if the response says bad-txns-inputs-missingorspent
+        else if response_json["error"]["message"].as_str().unwrap()
+            != "bad-txns-inputs-missingorspent"
+        {
+            println!("Unrecoverable Error {}: {:?}", i, response_json);
+            break;
+        }
+        // Sleep
+        let sleep_time = time::Duration::from_millis(1500 * 2_u64.pow(i));
+        println!("Parent txn not found. Retrying in {:?}", sleep_time);
+        thread::sleep(sleep_time);
+    }
+    txn_id
 }
